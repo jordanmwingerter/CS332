@@ -5,8 +5,9 @@
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <fcntl.h>
-#include <fcntl.h>
 #include <time.h>
+#include <sys/wait.h>
+#include <semaphore.h>
 
 #define NUM_PRODUCERS 10
 #define NUM_CONSUMERS 20
@@ -19,27 +20,24 @@ int pipe_fd[2];
 pthread_mutex_t write_mutex;
 pthread_mutex_t read_mutex;
 pthread_mutex_t print_mutex;
+sem_t pipe_sem;
 
 long long consumer_sums[NUM_CONSUMERS];
 
-typedef struct
-{
+typedef struct{
     int id;
 } ProducerArgs;
 
-typedef struct
-{
+typedef struct{
     int id;
     int read_fd;
 } ConsumerArgs;
 
-int write_all(int fd, const void *buf, size_t size)
-{
+int write_all(int fd, const void *buf, size_t size){
     const char *p = (const char *)buf;
     size_t total = 0;
 
-    while (total < size)
-    {
+    while (total < size){
         int n = write(fd,
                        p + total,
                        (unsigned int)(size - total));
@@ -53,13 +51,11 @@ int write_all(int fd, const void *buf, size_t size)
     return 0;
 }
 
-int read_all(int fd, void *buf, size_t size)
-{
+int read_all(int fd, void *buf, size_t size){
     char *p = (char *)buf;
     size_t total = 0;
 
-    while (total < size)
-    {
+    while (total < size){
         int n = read(fd,
                       p + total,
                       (unsigned int)(size - total));
@@ -76,8 +72,7 @@ int read_all(int fd, void *buf, size_t size)
     return 1;
 }
 
-void *producer(void *arg)
-{
+void *producer(void *arg){
     ProducerArgs *info = (ProducerArgs *)arg;
 
     unsigned int seed =
@@ -89,24 +84,28 @@ void *producer(void *arg)
     for (int i = 0; i <= MAX_NUMBER; i++)
         pool[i] = i;
 
-    for (int i = 0; i < NUM_PER_PRODUCER; i++)
-    {
+    for (int i = 0; i < NUM_PER_PRODUCER; i++){
         seed = seed * 1103515245 + 12345;
 
-        int j =
-            i + (seed % ((MAX_NUMBER + 1) - i));
+        int j = i + (seed % ((MAX_NUMBER + 1) - i));
 
         int temp = pool[i];
         pool[i] = pool[j];
         pool[j] = temp;
+        
+        sem_wait(&pipe_sem);
 
         pthread_mutex_lock(&write_mutex);
 
         write_all(pipe_fd[1],
-                  &pool[i],
-                  sizeof(int));
+            &pool[i],
+            sizeof(int));
 
         pthread_mutex_unlock(&write_mutex);
+
+        sem_post(&pipe_sem);
+
+        
 
         if ((i + 1) % 100 == 0)
         {
@@ -129,11 +128,10 @@ void *producer(void *arg)
 
     pthread_mutex_unlock(&print_mutex);
 
-    return 0;
+    return NULL;
 }
 
-void *consumer(void *arg)
-{
+void *consumer(void *arg){
     ConsumerArgs *info =
         (ConsumerArgs *)arg;
 
@@ -145,15 +143,20 @@ void *consumer(void *arg)
     {
         int value;
 
-        pthread_mutex_lock(&print_mutex);
+        sem_wait(&pipe_sem);
 
-        int status =
+        pthread_mutex_lock(&read_mutex);
+
+        int status = 
             read_all(info->read_fd,
-                     &value,
-                     sizeof(int));
+                    &value,
+                    sizeof(int));
 
-        pthread_mutex_unlock(&print_mutex);
+        pthread_mutex_unlock(&read_mutex);
 
+        sem_post(&pipe_sem);
+        
+        
         if (status != 1)
             break;
 
@@ -173,47 +176,37 @@ void *consumer(void *arg)
     return NULL;
 }
 
-int main(void)
-{
+int main(void){
     pthread_t producers[NUM_PRODUCERS];
     pthread_t consumers[NUM_CONSUMERS];
 
     ProducerArgs pargs[NUM_PRODUCERS];
     ConsumerArgs cargs[NUM_CONSUMERS];
 
-    if (pipe(pipe_fd) == -1)
-    {
+    if (pipe(pipe_fd) == -1){
         printf("Pipe creation failed\n");
         return 1;
     }
+    pid_t pid = fork();
+
+    if (pid < 0){
+        perror("fork");
+        return 1;
+    }   
+    
 
     pthread_mutex_init(&write_mutex, NULL);
     pthread_mutex_init(&read_mutex, NULL);
     pthread_mutex_init(&print_mutex, NULL);
+    sem_init(&pipe_sem, 0, 1);
 
-    printf("Starting consumer threads...\n");
+    if (pid > 0){
+        close(pipe_fd[0]); /* close read end */
 
-    for (int i = 0;
-         i < NUM_CONSUMERS;
-         i++)
-    {
-        cargs[i].id = i;
-        cargs[i].read_fd = pipe_fd[0];
+        printf("Starting producer threads...\n");
 
-        pthread_create(
-            &consumers[i],
-            NULL,
-            consumer,
-            &cargs[i]);
-    }
-
-    printf("Starting producer threads...\n");
-
-    for (int i = 0;
-         i < NUM_PRODUCERS;
-         i++)
-    {
-        pargs[i].id = i;
+        for (int i = 0; i < NUM_PRODUCERS; i++){
+            pargs[i].id = i;
 
         pthread_create(
             &producers[i],
@@ -222,10 +215,7 @@ int main(void)
             &pargs[i]);
     }
 
-    for (int i = 0;
-         i < NUM_PRODUCERS;
-         i++)
-    {
+    for (int i = 0; i < NUM_PRODUCERS; i++){
         pthread_join(
             producers[i],
             NULL);
@@ -235,6 +225,30 @@ int main(void)
 
     close(pipe_fd[1]);
 
+    wait(NULL);
+    sem_destroy(&pipe_sem);
+
+    return 0;
+    }else{
+        close(pipe_fd[1]);
+
+        printf("Starting consumer threads...\n");
+
+        for (int i = 0; i < NUM_CONSUMERS; i++){
+            cargs[i].id = i;
+            cargs[i].read_fd = pipe_fd[0];
+
+            pthread_create(
+                &consumers[i],
+                NULL,
+                consumer,
+                &cargs[i]);
+        }
+
+    
+
+    
+
     for (int i = 0;
          i < NUM_CONSUMERS;
          i++)
@@ -243,6 +257,7 @@ int main(void)
             consumers[i],
             NULL);
     }
+    printf("\nAll consumers complete.\n");
 
     long long total = 0;
 
@@ -257,26 +272,17 @@ int main(void)
         (double)total /
         NUM_CONSUMERS;
 
-    FILE *output =
-        fopen("output.txt", "w");
+    freopen(
+        "output.txt",
+        "w",
+        stdout);
 
-    if (output != NULL)
-    {
-        fprintf(output,
-                "==============================\n");
-        fprintf(output,
-                "Consumer Results\n");
-        fprintf(output,
-                "==============================\n");
-        fprintf(output,
-                "Total Sum: %lld\n",
-                total);
-        fprintf(output,
-                "Average Consumer Sum: %.2f\n",
-                average);
-
-        fclose(output);
-    }
+    printf("==============================\n"); 
+    printf("Consumer Results\n");
+    printf("==============================\n"); 
+    printf("Total Sum: %lld\n", total);
+    printf("Average Consumer Sum: %.2f\n",
+        average);
 
     close(pipe_fd[0]);
 
@@ -290,4 +296,6 @@ int main(void)
     printf("Results written to output.txt\n");
 
     return 0;
+    }
+
 }
