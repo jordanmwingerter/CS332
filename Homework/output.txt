@@ -1,0 +1,6 @@
+------------------------------
+Consumer Results
+------------------------------
+Total Sum: 2353512
+Average Consumer Sum: 117675.60
+Results written to output.txt

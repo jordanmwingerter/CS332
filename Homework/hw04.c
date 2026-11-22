@@ -277,9 +277,9 @@ int main(void){
         "w",
         stdout);
 
-    printf("==============================\n"); 
+    printf("------------------------------\n"); 
     printf("Consumer Results\n");
-    printf("==============================\n"); 
+    printf("------------------------------\n"); 
     printf("Total Sum: %lld\n", total);
     printf("Average Consumer Sum: %.2f\n",
         average);
