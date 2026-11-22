@@ -1,8 +1,10 @@
 #include <stdio.h>
 #include <stdlib.h>
-#include <windows.h>
-#include <process.h>
-#include <io.h>
+#include <pthread.h>
+#include <unistd.h>
+#include <sys/types.h>
+#include <sys/stat.h>
+#include <fcntl.h>
 #include <fcntl.h>
 #include <time.h>
 
@@ -14,9 +16,9 @@
 
 int pipe_fd[2];
 
-CRITICAL_SECTION write_mutex;
-CRITICAL_SECTION read_mutex;
-CRITICAL_SECTION print_mutex;
+pthread_mutex_t write_mutex;
+pthread_mutex_t read_mutex;
+pthread_mutex_t print_mutex;
 
 long long consumer_sums[NUM_CONSUMERS];
 
@@ -38,7 +40,7 @@ int write_all(int fd, const void *buf, size_t size)
 
     while (total < size)
     {
-        int n = _write(fd,
+        int n = write(fd,
                        p + total,
                        (unsigned int)(size - total));
 
@@ -58,7 +60,7 @@ int read_all(int fd, void *buf, size_t size)
 
     while (total < size)
     {
-        int n = _read(fd,
+        int n = read(fd,
                       p + total,
                       (unsigned int)(size - total));
 
@@ -74,7 +76,7 @@ int read_all(int fd, void *buf, size_t size)
     return 1;
 }
 
-DWORD WINAPI producer(LPVOID arg)
+void *producer(void *arg)
 {
     ProducerArgs *info = (ProducerArgs *)arg;
 
@@ -98,38 +100,39 @@ DWORD WINAPI producer(LPVOID arg)
         pool[i] = pool[j];
         pool[j] = temp;
 
-        EnterCriticalSection(&write_mutex);
+        pthread_mutex_lock(&write_mutex);
 
         write_all(pipe_fd[1],
                   &pool[i],
                   sizeof(int));
 
-        LeaveCriticalSection(&write_mutex);
+        pthread_mutex_unlock(&write_mutex);
 
         if ((i + 1) % 100 == 0)
         {
-            EnterCriticalSection(&print_mutex);
+            pthread_mutex_lock(&print_mutex);
 
             printf("Producer %d: %d%% complete\n",
                    info->id,
                    ((i + 1) * 100) /
                        NUM_PER_PRODUCER);
 
-            LeaveCriticalSection(&print_mutex);
+            pthread_mutex_unlock(&print_mutex);
         }
     }
 
-    EnterCriticalSection(&print_mutex);
+    pthread_mutex_lock(&print_mutex);
+
 
     printf("Producer %d finished\n",
            info->id);
 
-    LeaveCriticalSection(&print_mutex);
+    pthread_mutex_unlock(&print_mutex);
 
     return 0;
 }
 
-DWORD WINAPI consumer(LPVOID arg)
+void *consumer(void *arg)
 {
     ConsumerArgs *info =
         (ConsumerArgs *)arg;
@@ -142,53 +145,51 @@ DWORD WINAPI consumer(LPVOID arg)
     {
         int value;
 
-        EnterCriticalSection(&read_mutex);
+        pthread_mutex_lock(&print_mutex);
 
         int status =
             read_all(info->read_fd,
                      &value,
                      sizeof(int));
 
-        LeaveCriticalSection(&read_mutex);
+        pthread_mutex_unlock(&print_mutex);
 
         if (status != 1)
             break;
 
         sum += value;
     }
-
     consumer_sums[info->id] = sum;
 
-    EnterCriticalSection(&print_mutex);
+    pthread_mutex_lock(&print_mutex);
+
 
     printf("Consumer %d sum = %lld\n",
            info->id,
            sum);
 
-    LeaveCriticalSection(&print_mutex);
+    pthread_mutex_unlock(&print_mutex);
 
-    return 0;
+    return NULL;
 }
 
 int main(void)
 {
-    HANDLE producers[NUM_PRODUCERS];
-    HANDLE consumers[NUM_CONSUMERS];
+    pthread_t producers[NUM_PRODUCERS];
+    pthread_t consumers[NUM_CONSUMERS];
 
     ProducerArgs pargs[NUM_PRODUCERS];
     ConsumerArgs cargs[NUM_CONSUMERS];
 
-    if (_pipe(pipe_fd,
-              4096,
-              _O_BINARY) == -1)
+    if (pipe(pipe_fd) == -1)
     {
         printf("Pipe creation failed\n");
         return 1;
     }
 
-    InitializeCriticalSection(&write_mutex);
-    InitializeCriticalSection(&read_mutex);
-    InitializeCriticalSection(&print_mutex);
+    pthread_mutex_init(&write_mutex, NULL);
+    pthread_mutex_init(&read_mutex, NULL);
+    pthread_mutex_init(&print_mutex, NULL);
 
     printf("Starting consumer threads...\n");
 
@@ -199,14 +200,11 @@ int main(void)
         cargs[i].id = i;
         cargs[i].read_fd = pipe_fd[0];
 
-        consumers[i] =
-            CreateThread(
-                NULL,
-                0,
-                consumer,
-                &cargs[i],
-                0,
-                NULL);
+        pthread_create(
+            &consumers[i],
+            NULL,
+            consumer,
+            &cargs[i]);
     }
 
     printf("Starting producer threads...\n");
@@ -217,42 +215,33 @@ int main(void)
     {
         pargs[i].id = i;
 
-        producers[i] =
-            CreateThread(
-                NULL,
-                0,
-                producer,
-                &pargs[i],
-                0,
-                NULL);
+        pthread_create(
+            &producers[i],
+            NULL,
+            producer,
+            &pargs[i]);
     }
 
     for (int i = 0;
          i < NUM_PRODUCERS;
          i++)
     {
-        WaitForSingleObject(
+        pthread_join(
             producers[i],
-            INFINITE);
-
-        CloseHandle(
-            producers[i]);
+            NULL);
     }
 
     printf("\nAll producers complete.\n");
 
-    _close(pipe_fd[1]);
+    close(pipe_fd[1]);
 
     for (int i = 0;
          i < NUM_CONSUMERS;
          i++)
     {
-        WaitForSingleObject(
+        pthread_join(
             consumers[i],
-            INFINITE);
-
-        CloseHandle(
-            consumers[i]);
+            NULL);
     }
 
     long long total = 0;
@@ -289,13 +278,13 @@ int main(void)
         fclose(output);
     }
 
-    _close(pipe_fd[0]);
+    close(pipe_fd[0]);
 
-    DeleteCriticalSection(
+    pthread_mutex_destroy(
         &write_mutex);
-    DeleteCriticalSection(
+    pthread_mutex_destroy(
         &read_mutex);
-    DeleteCriticalSection(
+    pthread_mutex_destroy(
         &print_mutex);
 
     printf("Results written to output.txt\n");
